@@ -21,5 +21,5 @@ Meu portifolio de projetos em DataScience / My DataScience project portfolio
 ## Projetos:
 Veja os tutoriais publicados do Sigmoidal:
 
-* **Como usar o Histograma para Data Science:** https://bit.ly/2L2cMwy
+* **Analisando os Dados do Airbnb da cidade de New York:** https://bit.ly/2L2cMwy
 ---
