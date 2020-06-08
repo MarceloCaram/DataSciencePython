@@ -14,7 +14,7 @@ Meu portifolio de projetos em DataScience / My DataScience project portfolio
 
 **Links:**
 * [Blog](http://sigmoidal.ai)
-* [LinkedIn](https://www.linkedin.com/in/carlosfab)
+* [LinkedIn](https:/www.linkedin.com/in/marcelo-caram-4426a214)
 * [Medium](https://www.medium.com)
 
 
