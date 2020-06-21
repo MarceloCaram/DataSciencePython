@@ -22,4 +22,5 @@ Meu portifolio de projetos em DataScience / My DataScience project portfolio
 Veja os tutoriais publicados do Sigmoidal:
 
 * **Analisando os Dados do Airbnb da cidade de New York:** https://bit.ly/2ALylz3
+* **Analisando os Dados da violência da cidade do Rio de Janeiro:** https://bit.ly/3fKBLRC
 ---
