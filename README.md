@@ -8,7 +8,7 @@ Meu portifolio de projetos em DataScience / My DataScience project portfolio
 # Marcelo Caram
 <sub>*Lead Data Scientist*</sub>
 
-**Background in:** Python, Machine Learning, Space Operations and Mathematical Optimisation.
+**Background in:** Python.
 
 **Links:**
 * [Blog](http://sigmoidal.ai)
