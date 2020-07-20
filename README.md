@@ -21,4 +21,5 @@ Veja os tutoriais publicados do Sigmoidal:
 
 * **Analisando os Dados do Airbnb da cidade de New York:** https://bit.ly/2ALylz3
 * **Analisando os Dados da violência da cidade do Rio de Janeiro:** https://bit.ly/3fKBLRC
+* **Analisando os dados do COVID19 (no mundo e no Brasil): **https://bit.ly/3eLKGBq
 ---
