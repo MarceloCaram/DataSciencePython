@@ -14,16 +14,16 @@ Saidas:
     NBA_O.NBA_STG_PRODUTO_PRECO_TEL_FIXO    (schema NBA, delete + append by name)
 
 Mapeamento das etapas do .yxmd para este script:
-    ToolID 26/28 (Dynamic Input / query dinamica) -> QUERY_EXTRACAO (CTE itens_extrato)
-    ToolID 2  (Summarize: GroupBy + Max ID_COBRANCA_PARCEIRO)  -> CTE fatura_mais_recente
+    ToolID 26/28 (Dynamic Input / query dinamica)                    -> QUERY_ITENS_EXTRATO + extrai_itens_extrato()
+    ToolID 2  (Summarize: GroupBy + Max ID_COBRANCA_PARCEIRO)        -> calcula_fatura_mais_recente() [DataFrame groupBy/F.max]
     ToolID 3  (Join Left/Right por CD_BASE, NUM_CONTRATO, CID_CONTRATO,
-               ID_COBRANCA_PARCEIRO, COD_TERMINAL)             -> CTE itens_fatura_recente
-    ToolID 34 (Filter DSC_CODIGO != 'CREDITO')                 -> WHERE dentro da CTE acima
-    ToolID 4  (Summarize: GroupBy + Sum(VLR) por terminal)     -> CTE valor_por_terminal
-    ToolID 36 (Formula: COD_TERMINAL '-1' -> NULL)             -> CASE WHEN na CTE acima
-    ToolID 35 (Summarize: Sum + CountNonNull por contrato)     -> CTE valor_por_contrato
-    ToolID 37 (Formula: VAL_VALOR / TOTAL_TERMINAL, evita /0)  -> CTE acima (divisao com NULLIF)
-    ToolID 30 (Summarize: GroupBy de dedup / rename Avg_VAL_VALOR) -> SELECT final da query
+               ID_COBRANCA_PARCEIRO, COD_TERMINAL)                   -> filtra_itens_fatura_recente() [DataFrame join]
+    ToolID 34 (Filter DSC_CODIGO != 'CREDITO')                       -> filtra_itens_fatura_recente() [DataFrame filter]
+    ToolID 36 (Formula: COD_TERMINAL '-1' -> NULL)                   -> filtra_itens_fatura_recente() [DataFrame when/otherwise]
+    ToolID 4  (Summarize: GroupBy + Sum(VLR) por terminal)           -> soma_valor_por_terminal() [DataFrame groupBy/F.sum]
+    ToolID 35 (Summarize: Sum + CountNonNull por contrato)           -> soma_valor_por_contrato() [DataFrame groupBy/F.sum/F.count]
+    ToolID 37 (Formula: VAL_VALOR / TOTAL_TERMINAL, evita /0)        -> soma_valor_por_contrato() [DataFrame withColumn]
+    ToolID 30 (Summarize: GroupBy de dedup / rename Avg_VAL_VALOR)   -> renomeia_saida_final() [DataFrame withColumnRenamed]
     ToolID 6  (Output BI_FP_PROD_PRECO_FAT_TEL_FIXO, Overwrite)      -> grava_saida_origem()
     ToolID 12 (DbFileOutput com PreSQL de GRANT/ALTER TABLE)         -> executa_ddl_pos_carga()
     ToolID 38/39/42/40 (rename + DAT_MOVIMENTO=TRUNC(SYSDATE) +
@@ -48,13 +48,13 @@ infraestrutura do Alteryx) e portanto nao foram portados 1:1:
       estao em um DataFrame e sao gravados diretamente na conexao JDBC de
       destino (NBA_O), sem necessidade de tabela temporaria.
 
-Uso de SQL:
-    A extracao, os agrupamentos (GroupBy/Summarize) e os filtros do fluxo
-    original foram implementados como uma unica query SQL (CTEs), executada
-    no banco via JDBC. O resultado e carregado em um DataFrame Spark, que e
-    usado apenas para as gravacoes finais (e o pequeno enriquecimento de
-    DAT_MOVIMENTO, que no Alteryx e feito depois de os dados terem saido do
-    banco de origem).
+Uso de SQL vs DataFrame:
+    Apenas a extracao bruta (join das 5 tabelas de origem e filtros de
+    status/vencimento) e feita via SQL, executada no banco via JDBC - isso
+    equivale ao Dynamic Input original. Todos os agrupamentos (GroupBy) e
+    funcoes de agregacao (Max, Sum, CountNonNull) do fluxo Alteryx sao
+    implementados com a DataFrame API do PySpark (groupBy/agg com F.max,
+    F.sum, F.count), assim como os joins, filtros e formulas subsequentes.
 """
 
 import os
@@ -90,99 +90,47 @@ JDBC_DESTINO_NBA = {
 TABELA_SAIDA_ORIGEM = "BI_FP_PROD_PRECO_FAT_TEL_FIXO"
 TABELA_SAIDA_NBA = "NBA_O.NBA_STG_PRODUTO_PRECO_TEL_FIXO"
 
+CHAVE_CONTRATO_TERMINAL = ["CD_BASE", "NUM_CONTRATO", "CID_CONTRATO", "COD_TERMINAL"]
+CHAVE_CONTRATO = ["CD_BASE", "NUM_CONTRATO", "CID_CONTRATO"]
 
 # ---------------------------------------------------------------------------
-# Query de extracao (concentra os componentes de filtro/group by do .yxmd)
+# Query de extracao bruta (ToolID 26/28: apenas o join/filtro do Dynamic
+# Input, sem nenhuma agregacao - GroupBy/Max/Sum ficam a cargo do DataFrame)
 # ---------------------------------------------------------------------------
-QUERY_EXTRACAO = """
+QUERY_ITENS_EXTRATO = """
 (
-    WITH itens_extrato AS (
-        SELECT /*+ PARALLEL(A, 20) PARALLEL(B, 20) PARALLEL(C, 20) PARALLEL(D, 20) PARALLEL(E, 20) */
-               A.CD_BASE,
-               A.NUM_CONTRATO,
-               A.CID_CONTRATO,
-               A.ID_COBRANCA_PARCEIRO,
-               A.VLR,
-               NVL(E.DESCRICAO, 'X') AS DSC_CODIGO,
-               CASE
-                   WHEN A.CC_TERMINAL_ORIGEM LIKE 'FRANQUIA%' THEN '-1'
-                   ELSE SUBSTR(A.CC_TERMINAL_ORIGEM, 1, 10)
-               END AS COD_TERMINAL
-        FROM NETRDM.SN_ITEM_EXTRATO_PARCEIRO A
-        INNER JOIN NETRDM.SN_PARCEIRO B
-                ON B.FL_STATUS_BI = 'A'
-               AND B.NM_PARCEIRO = 'EMBRATEL'
-               AND B.CD_BASE = A.CD_BASE
-               AND B.ID_PARCEIRO = A.ID_PARCEIRO
-        INNER JOIN NETRDM.SN_TIPO_ITEM_EXTRATO_PARCEIRO C
-                ON C.FL_STATUS_BI = 'A'
-               AND C.CD_BASE = A.CD_BASE
-               AND C.ID_TIPO_ITEM_EXTRATO_PARCEIRO = A.ID_TIPO_ITEM_EXTRATO_PARCEIRO
-        INNER JOIN NETRDM.SN_GRUPO_TIPO_ITEM_EXTR_PARC D
-                ON D.FL_STATUS_BI = 'A'
-               AND D.CD_BASE = C.CD_BASE
-               AND D.ID_GRUPO_TIPO_ITEM_EXTR_PARC = C.ID_GRUPO_TIPO_ITEM_EXTR_PARC
-        LEFT JOIN NETRDM.SN_CODIGO_ITEM_EXTRATO E
-               ON E.FL_STATUS_BI = 'A'
-              AND E.CD_BASE = A.CD_BASE
-              AND E.CODIGO = A.CODIGO
-        WHERE A.FL_STATUS_BI = 'A'
-          AND A.DT_VENCTO >= ADD_MONTHS(SYSDATE, -6)
-    ),
-    -- ToolID 2: fatura (ID_COBRANCA_PARCEIRO) mais recente por
-    -- CD_BASE / NUM_CONTRATO / CID_CONTRATO / COD_TERMINAL
-    fatura_mais_recente AS (
-        SELECT CD_BASE,
-               NUM_CONTRATO,
-               CID_CONTRATO,
-               COD_TERMINAL,
-               MAX(ID_COBRANCA_PARCEIRO) AS ID_COBRANCA_PARCEIRO
-        FROM itens_extrato
-        GROUP BY CD_BASE, NUM_CONTRATO, CID_CONTRATO, COD_TERMINAL
-    ),
-    -- ToolID 3 (inner join com a fatura mais recente) + ToolID 34
-    -- (filtro DSC_CODIGO != 'CREDITO') + ToolID 36 (COD_TERMINAL '-1' -> NULL)
-    itens_fatura_recente AS (
-        SELECT I.CD_BASE,
-               I.NUM_CONTRATO,
-               I.CID_CONTRATO,
-               I.VLR,
-               CASE WHEN I.COD_TERMINAL = '-1' THEN NULL ELSE I.COD_TERMINAL END AS COD_TERMINAL
-        FROM itens_extrato I
-        INNER JOIN fatura_mais_recente F
-                ON F.CD_BASE = I.CD_BASE
-               AND F.NUM_CONTRATO = I.NUM_CONTRATO
-               AND F.CID_CONTRATO = I.CID_CONTRATO
-               AND F.COD_TERMINAL = I.COD_TERMINAL
-               AND F.ID_COBRANCA_PARCEIRO = I.ID_COBRANCA_PARCEIRO
-        WHERE I.DSC_CODIGO != 'CREDITO'
-    ),
-    -- ToolID 4: soma do valor por terminal
-    valor_por_terminal AS (
-        SELECT CD_BASE,
-               NUM_CONTRATO,
-               CID_CONTRATO,
-               COD_TERMINAL,
-               SUM(VLR) AS VAL_VALOR
-        FROM itens_fatura_recente
-        GROUP BY CD_BASE, NUM_CONTRATO, CID_CONTRATO, COD_TERMINAL
-    ),
-    -- ToolID 35 + ToolID 37: soma total e rateio pelo numero de terminais do contrato
-    valor_por_contrato AS (
-        SELECT CD_BASE                                       AS COD_BASE,
-               NUM_CONTRATO,
-               CID_CONTRATO                                  AS COD_CID_CONTRATO,
-               SUM(VAL_VALOR) / NULLIF(COUNT(COD_TERMINAL), 0) AS VAL_VALOR
-        FROM valor_por_terminal
-        GROUP BY CD_BASE, NUM_CONTRATO, CID_CONTRATO
-    )
-    -- ToolID 30: GroupBy final (dedup) / rename para Avg_VAL_VALOR
-    SELECT COD_BASE,
-           NUM_CONTRATO,
-           COD_CID_CONTRATO,
-           VAL_VALOR AS "Avg_VAL_VALOR"
-    FROM valor_por_contrato
-) QUERY_EXTRACAO
+    SELECT /*+ PARALLEL(A, 20) PARALLEL(B, 20) PARALLEL(C, 20) PARALLEL(D, 20) PARALLEL(E, 20) */
+           A.CD_BASE,
+           A.NUM_CONTRATO,
+           A.CID_CONTRATO,
+           A.ID_COBRANCA_PARCEIRO,
+           A.VLR,
+           NVL(E.DESCRICAO, 'X') AS DSC_CODIGO,
+           CASE
+               WHEN A.CC_TERMINAL_ORIGEM LIKE 'FRANQUIA%' THEN '-1'
+               ELSE SUBSTR(A.CC_TERMINAL_ORIGEM, 1, 10)
+           END AS COD_TERMINAL
+    FROM NETRDM.SN_ITEM_EXTRATO_PARCEIRO A
+    INNER JOIN NETRDM.SN_PARCEIRO B
+            ON B.FL_STATUS_BI = 'A'
+           AND B.NM_PARCEIRO = 'EMBRATEL'
+           AND B.CD_BASE = A.CD_BASE
+           AND B.ID_PARCEIRO = A.ID_PARCEIRO
+    INNER JOIN NETRDM.SN_TIPO_ITEM_EXTRATO_PARCEIRO C
+            ON C.FL_STATUS_BI = 'A'
+           AND C.CD_BASE = A.CD_BASE
+           AND C.ID_TIPO_ITEM_EXTRATO_PARCEIRO = A.ID_TIPO_ITEM_EXTRATO_PARCEIRO
+    INNER JOIN NETRDM.SN_GRUPO_TIPO_ITEM_EXTR_PARC D
+            ON D.FL_STATUS_BI = 'A'
+           AND D.CD_BASE = C.CD_BASE
+           AND D.ID_GRUPO_TIPO_ITEM_EXTR_PARC = C.ID_GRUPO_TIPO_ITEM_EXTR_PARC
+    LEFT JOIN NETRDM.SN_CODIGO_ITEM_EXTRATO E
+           ON E.FL_STATUS_BI = 'A'
+          AND E.CD_BASE = A.CD_BASE
+          AND E.CODIGO = A.CODIGO
+    WHERE A.FL_STATUS_BI = 'A'
+      AND A.DT_VENCTO >= ADD_MONTHS(SYSDATE, -6)
+) QUERY_ITENS_EXTRATO
 """
 
 
@@ -196,8 +144,8 @@ def resolver_conexao_origem(ambiente: str) -> dict:
     return conexoes_por_ambiente.get(ambiente, JDBC_ORIGEM)
 
 
-def extrai_valor_netfone(spark: SparkSession) -> DataFrame:
-    """Executa a query consolidada (extracao + group by + filtros) via JDBC."""
+def extrai_itens_extrato(spark: SparkSession) -> DataFrame:
+    """ToolID 26/28: le os itens de extrato ja filtrados, sem agregacao."""
     conexao = resolver_conexao_origem(AMBIENTE)
     return (
         spark.read.format("jdbc")
@@ -205,9 +153,77 @@ def extrai_valor_netfone(spark: SparkSession) -> DataFrame:
         .option("driver", conexao["driver"])
         .option("user", conexao["user"])
         .option("password", conexao["password"])
-        .option("query", QUERY_EXTRACAO)
+        .option("query", QUERY_ITENS_EXTRATO)
         .load()
     )
+
+
+def calcula_fatura_mais_recente(df_itens: DataFrame) -> DataFrame:
+    """ToolID 2: GroupBy + Max(ID_COBRANCA_PARCEIRO) por contrato/terminal."""
+    return df_itens.groupBy(*CHAVE_CONTRATO_TERMINAL).agg(
+        F.max("ID_COBRANCA_PARCEIRO").alias("ID_COBRANCA_PARCEIRO")
+    )
+
+
+def filtra_itens_fatura_recente(
+    df_itens: DataFrame, df_fatura_recente: DataFrame
+) -> DataFrame:
+    """ToolID 3 (join com a fatura mais recente) + ToolID 34 (filtro
+    DSC_CODIGO != 'CREDITO') + ToolID 36 (COD_TERMINAL '-1' -> NULL)."""
+    return (
+        df_itens.join(
+            df_fatura_recente,
+            on=CHAVE_CONTRATO_TERMINAL + ["ID_COBRANCA_PARCEIRO"],
+            how="inner",
+        )
+        .filter(F.col("DSC_CODIGO") != "CREDITO")
+        .withColumn(
+            "COD_TERMINAL",
+            F.when(F.col("COD_TERMINAL") == "-1", None).otherwise(F.col("COD_TERMINAL")),
+        )
+        .select(*CHAVE_CONTRATO_TERMINAL, "VLR")
+    )
+
+
+def soma_valor_por_terminal(df_itens_fatura_recente: DataFrame) -> DataFrame:
+    """ToolID 4: GroupBy + Sum(VLR) por CD_BASE/NUM_CONTRATO/CID_CONTRATO/COD_TERMINAL."""
+    return df_itens_fatura_recente.groupBy(*CHAVE_CONTRATO_TERMINAL).agg(
+        F.sum("VLR").alias("VAL_VALOR")
+    )
+
+
+def soma_valor_por_contrato(df_valor_por_terminal: DataFrame) -> DataFrame:
+    """ToolID 35 (GroupBy + Sum + CountNonNull) e ToolID 37 (rateio pelo
+    numero de terminais, evitando divisao por zero)."""
+    df_agregado = df_valor_por_terminal.groupBy(*CHAVE_CONTRATO).agg(
+        F.sum("VAL_VALOR").alias("VAL_VALOR_TOTAL"),
+        F.count("COD_TERMINAL").alias("TOTAL_TERMINAL"),  # F.count ignora nulos (CountNonNull)
+    )
+    return df_agregado.withColumn(
+        "VAL_VALOR",
+        F.col("VAL_VALOR_TOTAL")
+        / F.when(F.col("TOTAL_TERMINAL") == 0, F.lit(1)).otherwise(F.col("TOTAL_TERMINAL")),
+    ).drop("VAL_VALOR_TOTAL", "TOTAL_TERMINAL")
+
+
+def renomeia_saida_final(df_valor_por_contrato: DataFrame) -> DataFrame:
+    """ToolID 30: renomeia para o layout de saida (COD_BASE, COD_CID_CONTRATO, Avg_VAL_VALOR)."""
+    return (
+        df_valor_por_contrato.withColumnRenamed("CD_BASE", "COD_BASE")
+        .withColumnRenamed("CID_CONTRATO", "COD_CID_CONTRATO")
+        .withColumnRenamed("VAL_VALOR", "Avg_VAL_VALOR")
+        .select("COD_BASE", "NUM_CONTRATO", "COD_CID_CONTRATO", "Avg_VAL_VALOR")
+    )
+
+
+def calcula_valor_netfone(spark: SparkSession) -> DataFrame:
+    """Encadeia os passos de GroupBy/Max/Sum equivalentes ao container "Valor NETFone"."""
+    df_itens = extrai_itens_extrato(spark)
+    df_fatura_recente = calcula_fatura_mais_recente(df_itens)
+    df_itens_fatura_recente = filtra_itens_fatura_recente(df_itens, df_fatura_recente)
+    df_valor_por_terminal = soma_valor_por_terminal(df_itens_fatura_recente)
+    df_valor_por_contrato = soma_valor_por_contrato(df_valor_por_terminal)
+    return renomeia_saida_final(df_valor_por_contrato)
 
 
 def executa_ddl_pos_carga(spark: SparkSession) -> None:
@@ -297,7 +313,7 @@ def main() -> None:
         ).getOrCreate()
     )
 
-    df_valor_netfone = extrai_valor_netfone(spark).cache()
+    df_valor_netfone = calcula_valor_netfone(spark).cache()
 
     grava_saida_origem(df_valor_netfone)
     executa_ddl_pos_carga(spark)
