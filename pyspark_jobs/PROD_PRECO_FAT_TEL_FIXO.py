@@ -99,7 +99,7 @@ CHAVE_CONTRATO = ["CD_BASE", "NUM_CONTRATO", "CID_CONTRATO"]
 # ---------------------------------------------------------------------------
 QUERY_ITENS_EXTRATO = """
 (
-    SELECT /*+ PARALLEL(A, 20) PARALLEL(B, 20) PARALLEL(C, 20) PARALLEL(D, 20) PARALLEL(E, 20) */
+    SELECT /*+ PARALLEL(20) */
            A.CD_BASE,
            A.NUM_CONTRATO,
            A.CID_CONTRATO,
@@ -217,12 +217,31 @@ def renomeia_saida_final(df_valor_por_contrato: DataFrame) -> DataFrame:
 
 
 def calcula_valor_netfone(spark: SparkSession) -> DataFrame:
-    """Encadeia os passos de GroupBy/Max/Sum equivalentes ao container "Valor NETFone"."""
-    df_itens = extrai_itens_extrato(spark)
+    """Encadeia os passos de GroupBy/Max/Sum equivalentes ao container "Valor NETFone".
+
+    IMPORTANTE: df_itens e usado duas vezes a seguir - uma para calcular
+    df_fatura_recente (groupBy) e outra diretamente no join. Sem cache, o
+    Spark reexecutaria a query JDBC de extracao DUAS VEZES (uma por
+    consumidor), podendo ler snapshots diferentes da tabela de origem caso
+    ela receba cargas/commits concorrentes entre as duas leituras - o que
+    quebra a premissa de que a fatura mais recente calculada corresponde
+    exatamente aos itens usados no join. No Alteryx isso nao acontece
+    porque o In-DB Tools compila a cadeia inteira em uma unica query,
+    executada uma so vez. O .cache() + .count() abaixo materializa
+    df_itens uma unica vez, garantindo que ambos os consumidores usem
+    exatamente o mesmo snapshot.
+    """
+    df_itens = extrai_itens_extrato(spark).cache()
+    df_itens.count()  # forca a materializacao de uma unica leitura JDBC
+
     df_fatura_recente = calcula_fatura_mais_recente(df_itens)
     df_itens_fatura_recente = filtra_itens_fatura_recente(df_itens, df_fatura_recente)
     df_valor_por_terminal = soma_valor_por_terminal(df_itens_fatura_recente)
     df_valor_por_contrato = soma_valor_por_contrato(df_valor_por_terminal)
+    # Nao chamar df_itens.unpersist() aqui: os passos acima sao lazy, entao o
+    # cache so e efetivamente lido quando uma acao (write) rodar em main(),
+    # depois que esta funcao retornar. Liberar o cache antes disso forcaria
+    # o Spark a reler df_itens do JDBC, reintroduzindo o problema.
     return renomeia_saida_final(df_valor_por_contrato)
 
 
