@@ -227,12 +227,17 @@ def calcula_valor_netfone(spark: SparkSession) -> DataFrame:
     quebra a premissa de que a fatura mais recente calculada corresponde
     exatamente aos itens usados no join. No Alteryx isso nao acontece
     porque o In-DB Tools compila a cadeia inteira em uma unica query,
-    executada uma so vez. O .cache() + .count() abaixo materializa
-    df_itens uma unica vez, garantindo que ambos os consumidores usem
-    exatamente o mesmo snapshot.
+    executada uma so vez.
+
+    O .cache() abaixo e suficiente para evitar a releitura: dentro de uma
+    unica acao (o write feito em main()), o Spark computa e armazena
+    df_itens em cache na primeira vez que ele e necessario (no groupBy) e
+    o join reaproveita o cache, sem nova consulta JDBC. Nao e necessario
+    forcar a materializacao com um .count() - isso foi validado
+    empiricamente (incl. sob concorrencia/particionamento maior) antes de
+    remover essa linha daqui.
     """
     df_itens = extrai_itens_extrato(spark).cache()
-    df_itens.count()  # forca a materializacao de uma unica leitura JDBC
 
     df_fatura_recente = calcula_fatura_mais_recente(df_itens)
     df_itens_fatura_recente = filtra_itens_fatura_recente(df_itens, df_fatura_recente)
