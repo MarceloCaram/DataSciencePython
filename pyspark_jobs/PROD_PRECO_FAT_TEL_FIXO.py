@@ -15,11 +15,11 @@ Saidas:
 
 Mapeamento das etapas do .yxmd para este script:
     ToolID 26/28 (Dynamic Input / query dinamica)                    -> QUERY_ITENS_EXTRATO + extrai_itens_extrato()
-    ToolID 2  (Summarize: GroupBy + Max ID_COBRANCA_PARCEIRO)        -> calcula_fatura_mais_recente() [DataFrame groupBy/F.max]
+    ToolID 2  (Summarize: GroupBy + Max ID_COBRANCA_PARCEIRO)        -> seleciona_itens_fatura_mais_recente() [Window + F.max]
     ToolID 3  (Join Left/Right por CD_BASE, NUM_CONTRATO, CID_CONTRATO,
-               ID_COBRANCA_PARCEIRO, COD_TERMINAL)                   -> filtra_itens_fatura_recente() [DataFrame join]
-    ToolID 34 (Filter DSC_CODIGO != 'CREDITO')                       -> filtra_itens_fatura_recente() [DataFrame filter]
-    ToolID 36 (Formula: COD_TERMINAL '-1' -> NULL)                   -> filtra_itens_fatura_recente() [DataFrame when/otherwise]
+               ID_COBRANCA_PARCEIRO, COD_TERMINAL)                   -> seleciona_itens_fatura_mais_recente() [Window + filter]
+    ToolID 34 (Filter DSC_CODIGO != 'CREDITO')                       -> seleciona_itens_fatura_mais_recente() [DataFrame filter]
+    ToolID 36 (Formula: COD_TERMINAL '-1' -> NULL)                   -> seleciona_itens_fatura_mais_recente() [DataFrame when/otherwise]
     ToolID 4  (Summarize: GroupBy + Sum(VLR) por terminal)           -> soma_valor_por_terminal() [DataFrame groupBy/F.sum]
     ToolID 35 (Summarize: Sum + CountNonNull por contrato)           -> soma_valor_por_contrato() [DataFrame groupBy/F.sum/F.count]
     ToolID 37 (Formula: VAL_VALOR / TOTAL_TERMINAL, evita /0)        -> soma_valor_por_contrato() [DataFrame withColumn]
@@ -53,13 +53,23 @@ Uso de SQL vs DataFrame:
     status/vencimento) e feita via SQL, executada no banco via JDBC - isso
     equivale ao Dynamic Input original. Todos os agrupamentos (GroupBy) e
     funcoes de agregacao (Max, Sum, CountNonNull) do fluxo Alteryx sao
-    implementados com a DataFrame API do PySpark (groupBy/agg com F.max,
-    F.sum, F.count), assim como os joins, filtros e formulas subsequentes.
+    implementados com a DataFrame API do PySpark (groupBy/agg/window com
+    F.max, F.sum, F.count), assim como os filtros e formulas subsequentes.
+
+Nota sobre "fatura mais recente" (ToolID 2 + 3): a primeira versao deste
+    passo usava groupBy(...).agg(F.max(...)) seguido de um join de volta em
+    df_itens - esse padrao consome df_itens DUAS VEZES (uma no groupBy, outra
+    no join), o que exige cache() para nao reler/reexecutar a extracao JDBC
+    duas vezes, e cachear a extracao inteira sem particionamento JDBC (uma
+    unica particao) e pesado em memoria. Por isso a implementacao atual usa
+    uma window function (F.max().over(Window.partitionBy(...))), que calcula
+    a mesma coisa em uma UNICA passada por df_itens, sem groupBy separado,
+    sem join de volta e sem necessidade de cache.
 """
 
 import os
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 # ---------------------------------------------------------------------------
@@ -144,38 +154,72 @@ def resolver_conexao_origem(ambiente: str) -> dict:
     return conexoes_por_ambiente.get(ambiente, JDBC_ORIGEM)
 
 
+def opcoes_particionamento_jdbc() -> dict:
+    """Particionamento OPCIONAL da leitura JDBC (recomendado em producao).
+
+    Sem isso, o Spark le QUERY_ITENS_EXTRATO inteira em UMA UNICA
+    particao/conexao - todo o volume vira 1 task so, o que pesa em memoria
+    (foi um dos fatores do OutOfMemoryError observado no notebook OCI) e
+    nao usa o paralelismo do cluster. Configurando as variaveis de ambiente
+    abaixo, a leitura e dividida em N particoes:
+        NETCDM_JDBC_PARTITION_COLUMN - coluna numerica presente no SELECT
+                                        de QUERY_ITENS_EXTRATO para
+                                        particionar (ex.: NUM_CONTRATO)
+        NETCDM_JDBC_LOWER_BOUND      - menor valor esperado da coluna
+        NETCDM_JDBC_UPPER_BOUND      - maior valor esperado da coluna
+        NETCDM_JDBC_NUM_PARTITIONS   - quantidade de particoes (ex.: 8)
+    Se NETCDM_JDBC_PARTITION_COLUMN nao estiver definida, mantem o
+    comportamento atual (uma unica particao).
+    """
+    coluna = os.environ.get("NETCDM_JDBC_PARTITION_COLUMN")
+    if not coluna:
+        return {}
+    return {
+        "partitionColumn": coluna,
+        "lowerBound": os.environ["NETCDM_JDBC_LOWER_BOUND"],
+        "upperBound": os.environ["NETCDM_JDBC_UPPER_BOUND"],
+        "numPartitions": os.environ.get("NETCDM_JDBC_NUM_PARTITIONS", "8"),
+    }
+
+
 def extrai_itens_extrato(spark: SparkSession) -> DataFrame:
     """ToolID 26/28: le os itens de extrato ja filtrados, sem agregacao."""
     conexao = resolver_conexao_origem(AMBIENTE)
-    return (
+    leitor = (
         spark.read.format("jdbc")
         .option("url", conexao["url"])
         .option("driver", conexao["driver"])
         .option("user", conexao["user"])
         .option("password", conexao["password"])
         .option("query", QUERY_ITENS_EXTRATO)
-        .load()
     )
+    for chave, valor in opcoes_particionamento_jdbc().items():
+        leitor = leitor.option(chave, valor)
+    return leitor.load()
 
 
-def calcula_fatura_mais_recente(df_itens: DataFrame) -> DataFrame:
-    """ToolID 2: GroupBy + Max(ID_COBRANCA_PARCEIRO) por contrato/terminal."""
-    return df_itens.groupBy(*CHAVE_CONTRATO_TERMINAL).agg(
-        F.max("ID_COBRANCA_PARCEIRO").alias("ID_COBRANCA_PARCEIRO")
-    )
+def seleciona_itens_fatura_mais_recente(df_itens: DataFrame) -> DataFrame:
+    """ToolID 2 (Max ID_COBRANCA_PARCEIRO) + ToolID 3 (Join de volta) +
+    ToolID 34 (filtro DSC_CODIGO != 'CREDITO') + ToolID 36 (COD_TERMINAL
+    '-1' -> NULL).
 
-
-def filtra_itens_fatura_recente(
-    df_itens: DataFrame, df_fatura_recente: DataFrame
-) -> DataFrame:
-    """ToolID 3 (join com a fatura mais recente) + ToolID 34 (filtro
-    DSC_CODIGO != 'CREDITO') + ToolID 36 (COD_TERMINAL '-1' -> NULL)."""
+    Implementado com uma window function (F.max().over(...)) em vez de
+    groupBy + join de volta na mesma origem (df_itens.join(df_itens.groupBy(...))).
+    O padrao groupBy+join exige LER df_itens DUAS VEZES (uma para o groupBy,
+    outra para o join), o que so fica seguro/consistente com .cache() - e
+    cachear a extracao inteira (sem particionamento JDBC, tudo em uma unica
+    particao) foi o que causou o OutOfMemoryError no notebook OCI. A window
+    function calcula o "maior ID_COBRANCA_PARCEIRO do grupo" ao lado de cada
+    linha em UMA UNICA passada por df_itens (um so shuffle pela chave), sem
+    precisar reler nem cachear a extracao.
+    """
+    janela_contrato_terminal = Window.partitionBy(*CHAVE_CONTRATO_TERMINAL)
     return (
-        df_itens.join(
-            df_fatura_recente,
-            on=CHAVE_CONTRATO_TERMINAL + ["ID_COBRANCA_PARCEIRO"],
-            how="inner",
+        df_itens.withColumn(
+            "ID_COBRANCA_PARCEIRO_MAX",
+            F.max("ID_COBRANCA_PARCEIRO").over(janela_contrato_terminal),
         )
+        .filter(F.col("ID_COBRANCA_PARCEIRO") == F.col("ID_COBRANCA_PARCEIRO_MAX"))
         .filter(F.col("DSC_CODIGO") != "CREDITO")
         .withColumn(
             "COD_TERMINAL",
@@ -219,34 +263,15 @@ def renomeia_saida_final(df_valor_por_contrato: DataFrame) -> DataFrame:
 def calcula_valor_netfone(spark: SparkSession) -> DataFrame:
     """Encadeia os passos de GroupBy/Max/Sum equivalentes ao container "Valor NETFone".
 
-    IMPORTANTE: df_itens e usado duas vezes a seguir - uma para calcular
-    df_fatura_recente (groupBy) e outra diretamente no join. Sem cache, o
-    Spark reexecutaria a query JDBC de extracao DUAS VEZES (uma por
-    consumidor), podendo ler snapshots diferentes da tabela de origem caso
-    ela receba cargas/commits concorrentes entre as duas leituras - o que
-    quebra a premissa de que a fatura mais recente calculada corresponde
-    exatamente aos itens usados no join. No Alteryx isso nao acontece
-    porque o In-DB Tools compila a cadeia inteira em uma unica query,
-    executada uma so vez.
-
-    O .cache() abaixo e suficiente para evitar a releitura: dentro de uma
-    unica acao (o write feito em main()), o Spark computa e armazena
-    df_itens em cache na primeira vez que ele e necessario (no groupBy) e
-    o join reaproveita o cache, sem nova consulta JDBC. Nao e necessario
-    forcar a materializacao com um .count() - isso foi validado
-    empiricamente (incl. sob concorrencia/particionamento maior) antes de
-    remover essa linha daqui.
+    Pipeline linear (sem branching de volta para df_itens), entao nao ha
+    necessidade de .cache(): cada DataFrame e consumido uma unica vez pelo
+    proximo passo. Isso evita tanto a duplicacao de leitura JDBC quanto o
+    consumo extra de memoria de cachear a extracao inteira.
     """
-    df_itens = extrai_itens_extrato(spark).cache()
-
-    df_fatura_recente = calcula_fatura_mais_recente(df_itens)
-    df_itens_fatura_recente = filtra_itens_fatura_recente(df_itens, df_fatura_recente)
+    df_itens = extrai_itens_extrato(spark)
+    df_itens_fatura_recente = seleciona_itens_fatura_mais_recente(df_itens)
     df_valor_por_terminal = soma_valor_por_terminal(df_itens_fatura_recente)
     df_valor_por_contrato = soma_valor_por_contrato(df_valor_por_terminal)
-    # Nao chamar df_itens.unpersist() aqui: os passos acima sao lazy, entao o
-    # cache so e efetivamente lido quando uma acao (write) rodar em main(),
-    # depois que esta funcao retornar. Liberar o cache antes disso forcaria
-    # o Spark a reler df_itens do JDBC, reintroduzindo o problema.
     return renomeia_saida_final(df_valor_por_contrato)
 
 
