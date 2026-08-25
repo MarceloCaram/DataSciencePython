@@ -34,6 +34,7 @@ comportamento do módulo Alteryx.
 import logging
 
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("WF_NBAO_020715_PERFIL_USUARIO")
@@ -171,68 +172,94 @@ def carrega_tmp_dsc_perfil(spark: SparkSession) -> DataFrame:
 
 # ---------------------------------------------------------------------------
 # Etapa 02 (Macro.NBA.020715.02): relacionamento perfil x tipo de solicitação x produto
+#
+# Reproduz os dois componentes "Connect In-DB" da macro (perfil/departamento e
+# tipo de solicitação/produto) como dois DataFrames independentes; o Join, o
+# Filter e o Summarize(GroupBy) do Alteryx são feitos via API de DataFrame,
+# em vez de um único SQL combinado.
 # ---------------------------------------------------------------------------
-def carrega_tmp_produto_perfil(spark: SparkSession) -> DataFrame:
-    produtos_excluidos_sql = ", ".join(str(p) for p in PRODUTOS_EXCLUIDOS)
-    perfis_excluidos_sql = ", ".join(f"'{p}'" for p in PERFIS_EXCLUIDOS)
-
+def carrega_perfil_departamento(spark: SparkSession) -> DataFrame:
+    """Connect In-DB (1): perfis válidos e o departamento associado."""
     query = f"""
-        SELECT DISTINCT
-            P.CD_BASE       AS COD_BASE,
-            P.NOME_PERFIL   AS DSC_PERFIL,
-            S.ID_TIPO_SOLIC AS COD_TIPO_SOLIC,
-            S.ID_PRODUTO    AS COD_PRODUTO
-        FROM (
-            SELECT A.CD_BASE, A.NOME_PERFIL, D.ID_DEPTO
-            FROM NETRDM.PR_PERFIL A
-            INNER JOIN {TABELA_TMP_DSC_PERFIL} B
-                    ON B.DSC_PERFIL = A.NOME_PERFIL
-            INNER JOIN SQOOP.PR_REL_PERFIL_NIVEL_OPER C
-                    ON C.FL_STATUS_BI = 'A'
-                   AND C.CD_BASE = A.CD_BASE
-                   AND C.ID_PERFIL = A.ID_PERFIL
-            INNER JOIN NETRDM.PR_SN_DEPTO D
-                    ON D.FL_STATUS_BI = 'A'
-                   AND D.CD_BASE = C.CD_BASE
-                   AND D.ID_NIVEL_OPER = C.ID_NIVEL_OPER
-            INNER JOIN NETRDM.PR_NIVEL_OPER E
-                    ON E.FL_STATUS_BI = 'A'
-                   AND E.ID_SIS = 1
-                   AND E.CD_BASE = D.CD_BASE
-                   AND E.ID_NIVEL_OPER = D.ID_NIVEL_OPER
-            WHERE A.FL_STATUS_BI = 'A'
-              AND A.CD_BASE != 'CTV'
-        ) P
-        INNER JOIN (
-            SELECT DISTINCT
-                A.CD_BASE,
-                A.ID_TIPO_SOLIC,
-                B.ID_PRODUTO,
-                C.ID_DEPTO
-            FROM NETRDM.SN_TIPO_SOLIC_PROD A
-            INNER JOIN (
-                SELECT DISTINCT CD_BASE, ID_PRODUTO
-                FROM MDWALTERYXPRD.BI_DIM_PRODUTO_PRECO_TABELA
-            ) B
-                    ON B.CD_BASE = A.CD_BASE
-                   AND B.ID_PRODUTO = A.ID_PROD_PARA
-            INNER JOIN NETRDM.SN_REL_TIPO_SOLIC_DEPTO C
-                    ON C.FL_STATUS_BI = 'A'
-                   AND C.ACAO = 1
-                   AND C.CD_BASE = A.CD_BASE
-                   AND C.ID_TIPO_SOLIC_PROD = A.ID_TIPO_SOLIC_PROD
-            WHERE A.FL_STATUS_BI = 'A'
-              AND A.CD_BASE != 'CTV'
-              AND A.ID_TIPO_SOLIC IN (3, 24, 26, 917)
-        ) S
-                ON S.CD_BASE = P.CD_BASE
-               AND S.ID_DEPTO = P.ID_DEPTO
-        WHERE NOT (
-              S.ID_PRODUTO IN ({produtos_excluidos_sql})
-          AND P.NOME_PERFIL IN ({perfis_excluidos_sql})
-        )
+        SELECT A.CD_BASE, A.NOME_PERFIL, D.ID_DEPTO
+        FROM NETRDM.PR_PERFIL A
+        INNER JOIN {TABELA_TMP_DSC_PERFIL} B
+                ON B.DSC_PERFIL = A.NOME_PERFIL
+        INNER JOIN SQOOP.PR_REL_PERFIL_NIVEL_OPER C
+                ON C.FL_STATUS_BI = 'A'
+               AND C.CD_BASE = A.CD_BASE
+               AND C.ID_PERFIL = A.ID_PERFIL
+        INNER JOIN NETRDM.PR_SN_DEPTO D
+                ON D.FL_STATUS_BI = 'A'
+               AND D.CD_BASE = C.CD_BASE
+               AND D.ID_NIVEL_OPER = C.ID_NIVEL_OPER
+        INNER JOIN NETRDM.PR_NIVEL_OPER E
+                ON E.FL_STATUS_BI = 'A'
+               AND E.ID_SIS = 1
+               AND E.CD_BASE = D.CD_BASE
+               AND E.ID_NIVEL_OPER = D.ID_NIVEL_OPER
+        WHERE A.FL_STATUS_BI = 'A'
+          AND A.CD_BASE != 'CTV'
     """
-    df = read_query(spark, JDBC_NETCDM, f"({query})")
+    return read_query(spark, JDBC_NETCDM, f"({query})")
+
+
+def carrega_tipo_solic_produto(spark: SparkSession) -> DataFrame:
+    """Connect In-DB (3): tipos de solicitação e produtos elegíveis por departamento."""
+    query = """
+        SELECT DISTINCT
+            A.CD_BASE,
+            A.ID_TIPO_SOLIC,
+            B.ID_PRODUTO,
+            C.ID_DEPTO
+        FROM NETRDM.SN_TIPO_SOLIC_PROD A
+        INNER JOIN (
+            SELECT DISTINCT CD_BASE, ID_PRODUTO
+            FROM MDWALTERYXPRD.BI_DIM_PRODUTO_PRECO_TABELA
+        ) B
+                ON B.CD_BASE = A.CD_BASE
+               AND B.ID_PRODUTO = A.ID_PROD_PARA
+        INNER JOIN NETRDM.SN_REL_TIPO_SOLIC_DEPTO C
+                ON C.FL_STATUS_BI = 'A'
+               AND C.ACAO = 1
+               AND C.CD_BASE = A.CD_BASE
+               AND C.ID_TIPO_SOLIC_PROD = A.ID_TIPO_SOLIC_PROD
+        WHERE A.FL_STATUS_BI = 'A'
+          AND A.CD_BASE != 'CTV'
+          AND A.ID_TIPO_SOLIC IN (3, 24, 26, 917)
+    """
+    return read_query(spark, JDBC_NETCDM, f"({query})")
+
+
+def carrega_tmp_produto_perfil(spark: SparkSession) -> DataFrame:
+    df_perfil_depto = carrega_perfil_departamento(spark)
+    df_tipo_solic_produto = carrega_tipo_solic_produto(spark)
+
+    # Join (Inner) do Macro.NBA.020715.02: CD_BASE + ID_DEPTO.
+    df_join = df_perfil_depto.join(
+        df_tipo_solic_produto,
+        on=["CD_BASE", "ID_DEPTO"],
+        how="inner",
+    )
+
+    # Filter: exclui a combinação produto x perfil do NETSMS informada na macro.
+    df_filtrado = df_join.filter(
+        ~(
+            F.col("ID_PRODUTO").isin(PRODUTOS_EXCLUIDOS)
+            & F.col("NOME_PERFIL").isin(PERFIS_EXCLUIDOS)
+        )
+    )
+
+    # Select + Summarize(GroupBy) => rename de colunas e distinct.
+    df = (
+        df_filtrado.select(
+            F.col("CD_BASE").alias("COD_BASE"),
+            F.col("NOME_PERFIL").alias("DSC_PERFIL"),
+            F.col("ID_TIPO_SOLIC").alias("COD_TIPO_SOLIC"),
+            F.col("ID_PRODUTO").alias("COD_PRODUTO"),
+        )
+        .distinct()
+    )
 
     write_table(df, JDBC_NETCDM, TABELA_TMP_PRODUTO_PERFIL, mode="overwrite")
     logger.info("Tabela NBA_TMP_PRODUTO_PERFIL carregada com %d registros.", df.count())
