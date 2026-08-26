@@ -245,8 +245,8 @@ def carrega_tmp_produto_perfil(spark: SparkSession) -> DataFrame:
     # Filter: exclui a combinação produto x perfil do NETSMS informada na macro.
     df_filtrado = df_join.filter(
         ~(
-            F.col("ID_PRODUTO").isin(PRODUTOS_EXCLUIDOS)
-            & F.col("NOME_PERFIL").isin(PERFIS_EXCLUIDOS)
+            F.col("ID_PRODUTO").isin(*PRODUTOS_EXCLUIDOS)
+            & F.col("NOME_PERFIL").isin(*PERFIS_EXCLUIDOS)
         )
     )
 
