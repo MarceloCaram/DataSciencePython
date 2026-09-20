@@ -1,0 +1,186 @@
+// MingalBank — Fase 1 (MVP) Prisma schema
+// Field names mirror packages/shared/domain.ts to keep API responses consistent
+// between apps/api and apps/mobile.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AllowancePeriod {
+  WEEKLY
+  MONTHLY
+}
+
+enum TaskCategory {
+  HEALTH
+  STUDY
+  HOME
+  CREATIVITY
+}
+
+enum TaskCompletionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RewardType {
+  PRIVILEGE
+  CASH
+}
+
+enum TransactionType {
+  ALLOWANCE_CREDIT
+  TASK_REWARD
+  STREAK_BONUS
+  REDEMPTION
+  REWARD_REDEMPTION
+}
+
+enum BadgeTier {
+  BRONZE
+  SILVER
+  GOLD
+}
+
+model Family {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  parents Parent[]
+  children Child[]
+  tasks    Task[]
+  rewards  Reward[]
+
+  @@map("families")
+}
+
+model Parent {
+  id               String   @id @default(cuid())
+  familyId         String
+  family           Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name             String
+  email            String   @unique
+  passwordHash     String
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  reviewedCompletions   TaskCompletion[]    @relation("ParentReviewedCompletions")
+  reviewedRedemptions   RedemptionRequest[] @relation("ParentReviewedRedemptions")
+
+  @@map("parents")
+}
+
+model Child {
+  id               String          @id @default(cuid())
+  familyId         String
+  family           Family          @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name             String
+  photoUrl         String?
+  birthDate        DateTime
+  trustLevel       Int             @default(1)
+  allowanceValue   Float
+  allowancePeriod  AllowancePeriod
+  pointsBalance    Int             @default(0)
+  walletBalance    Float           @default(0)
+  currentStreak    Int             @default(0)
+  // Last calendar date (UTC, truncated to day) on which a task completion was
+  // approved for this child. Used to compute streak continuity.
+  lastApprovedDate DateTime?
+  badgeTier        BadgeTier       @default(BRONZE)
+  // Hash of the child's PIN (bcrypt). Null until a parent sets one via
+  // POST /auth/child/pin.
+  pinHash          String?
+  createdAt        DateTime        @default(now())
+
+  tasks        Task[]
+  completions  TaskCompletion[]
+  transactions WalletTransaction[]
+  redemptions  RedemptionRequest[]
+
+  @@map("children")
+}
+
+model Task {
+  id        String       @id @default(cuid())
+  familyId  String
+  family    Family       @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  childId   String
+  child     Child        @relation(fields: [childId], references: [id], onDelete: Cascade)
+  title     String
+  category  TaskCategory
+  points    Int
+  dueDate   DateTime
+  createdAt DateTime     @default(now())
+
+  completions TaskCompletion[]
+
+  @@map("tasks")
+}
+
+model TaskCompletion {
+  id                  String               @id @default(cuid())
+  taskId              String
+  task                Task                 @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  childId             String
+  child               Child                @relation(fields: [childId], references: [id], onDelete: Cascade)
+  status              TaskCompletionStatus @default(PENDING)
+  evidenceUrl         String?
+  completedAt         DateTime             @default(now())
+  reviewedAt          DateTime?
+  reviewedByParentId  String?
+  reviewedByParent    Parent?              @relation("ParentReviewedCompletions", fields: [reviewedByParentId], references: [id])
+
+  @@map("task_completions")
+}
+
+model Reward {
+  id         String     @id @default(cuid())
+  familyId   String
+  family     Family     @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  title      String
+  type       RewardType
+  pointsCost Int
+  cashValue  Float?
+  createdAt  DateTime   @default(now())
+
+  @@map("rewards")
+}
+
+model WalletTransaction {
+  id          String           @id @default(cuid())
+  childId     String
+  child       Child            @relation(fields: [childId], references: [id], onDelete: Cascade)
+  type        TransactionType
+  points      Int?
+  amount      Float?
+  description String
+  createdAt   DateTime         @default(now())
+
+  @@map("wallet_transactions")
+}
+
+// Child-initiated request to convert pointsBalance into walletBalance (cash).
+// `points` is the number of points the child asked to redeem; `amount` is the
+// cash amount that will be credited if approved, calculated with the
+// conversion rate in src/modules/wallet/constants.ts at request time.
+model RedemptionRequest {
+  id                 String               @id @default(cuid())
+  childId            String
+  child              Child                @relation(fields: [childId], references: [id], onDelete: Cascade)
+  points             Int
+  amount             Float
+  status             TaskCompletionStatus @default(PENDING)
+  requestedAt        DateTime             @default(now())
+  reviewedAt         DateTime?
+  reviewedByParentId String?
+  reviewedByParent   Parent?              @relation("ParentReviewedRedemptions", fields: [reviewedByParentId], references: [id])
+
+  @@map("redemption_requests")
+}
