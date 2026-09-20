@@ -31,6 +31,7 @@ function LoginScreenInner() {
     setProfilesLoading(true);
     getChildLoginProfiles()
       .then(setProfiles)
+      .catch(() => setProfiles([]))
       .finally(() => setProfilesLoading(false));
   }, [view]);
 

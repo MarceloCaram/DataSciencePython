@@ -17,6 +17,8 @@
  */
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { mockApi } from "../api/mock";
+
 const STORAGE_KEY = "mingalbank.knownChildren";
 
 export interface KnownChildProfile {
@@ -58,10 +60,15 @@ export async function rememberChildProfile(profile: KnownChildProfile): Promise<
  * responsável loga uma vez neste aparelho, o cache real assume.
  */
 export async function getChildLoginProfiles(): Promise<KnownChildProfile[]> {
-  const cached = await getKnownChildProfiles();
-  if (cached.length > 0) return cached;
+  try {
+    const cached = await getKnownChildProfiles();
+    if (cached.length > 0) return cached;
 
-  const { mockApi } = await import("../api/mock");
-  const demoChildren = await mockApi.listChildren();
-  return demoChildren.map((child) => ({ id: child.id, name: child.name, photoUrl: child.photoUrl }));
+    const demoChildren = await mockApi.listChildren();
+    return demoChildren.map((child) => ({ id: child.id, name: child.name, photoUrl: child.photoUrl }));
+  } catch {
+    // Nunca deve travar a tela de login — na pior das hipóteses, mostra a
+    // lista vazia e o usuário pode tentar de novo ou logar como responsável.
+    return [];
+  }
 }
