@@ -8,7 +8,6 @@ export const createTaskSchema = z.object({
   title: z.string().trim().min(1, "title é obrigatório"),
   category: taskCategoryEnum,
   points: z.coerce.number().int().positive("points deve ser positivo"),
-  dueDate: z.coerce.date({ errorMap: () => ({ message: "dueDate inválida" }) }),
 });
 export type CreateTaskInput = z.infer<typeof createTaskSchema>;
 

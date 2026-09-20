@@ -97,6 +97,7 @@ src/
   modules/
     auth/                  # registro/login de pai, login de filho, set PIN
     children/               # CRUD de filhos
+    family/                  # GET/PATCH /family/settings (hoje só weekendMultiplier)
     tasks/                   # criação, listagem, conclusão e revisão de tarefas
       taskApproval.service.ts # regra de aprovação isolada (testável sem Prisma real)
     wallet/
@@ -122,9 +123,15 @@ test/
   - Segunda aprovação no *mesmo dia* → streak não muda (um dia só conta uma vez).
   - Aprovação no dia seguinte ao último dia aprovado → streak `+1`.
   - Aprovação depois de pular ao menos um dia → streak quebra e reinicia em `1`.
-- **Bônus de fim de semana**: `applyWeekendMultiplier` aplica 1.5x aos pontos base da
-  tarefa quando a aprovação cai em sábado ou domingo (UTC), arredondando para o
-  inteiro mais próximo.
+- **Bônus de fim de semana (configurável)**: `applyWeekendMultiplier` aplica o
+  `Family.weekendMultiplier` (default `1.5`, configurável por família via
+  `GET`/`PATCH /family/settings`, faixa 1–3) aos pontos base da tarefa quando a
+  aprovação cai em sábado ou domingo (UTC), arredondando para o inteiro mais
+  próximo. `GET /tasks` já retorna `effectivePoints` (pontos base × multiplicador de
+  hoje) em cada tarefa, para a UI do filho nunca mostrar um valor diferente do que
+  será creditado ao aprovar.
+- **Sem prazo de tarefa**: `Task` não tem `dueDate` — uma tarefa fica disponível até
+  ser concluída, sem data limite (decisão de produto: simplifica o fluxo do filho).
 - **Bônus de streak (+10%)**: o PRD descreve isso de forma um pouco ambígua ("+10% a
   cada semana com mais de 20 pontos"). Interpretação implementada em
   `applyStreakBonus`: mantemos a soma de pontos de `TASK_REWARD` já creditados nessa

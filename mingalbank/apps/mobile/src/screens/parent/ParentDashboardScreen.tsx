@@ -102,7 +102,10 @@ export function ParentDashboardScreen() {
           <Card key={item.id}>
             <Text style={[styles.itemTitle, { color: theme.colors.textPrimary }]}>{item.taskTitle}</Text>
             <Text style={{ color: theme.colors.textSecondary, marginBottom: 10 }}>
-              {item.childName} · {item.points} pts
+              {item.childName} ·{" "}
+              {item.effectivePoints > item.points
+                ? `${item.effectivePoints} pts (base ${item.points} + bônus)`
+                : `${item.points} pts`}
             </Text>
             <View style={styles.actionsRow}>
               <Button

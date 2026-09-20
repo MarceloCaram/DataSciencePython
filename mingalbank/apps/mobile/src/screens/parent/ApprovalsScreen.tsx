@@ -76,7 +76,11 @@ export function ApprovalsScreen() {
           <Card key={item.id}>
             <Text style={[styles.title, { color: theme.colors.textPrimary }]}>{item.taskTitle}</Text>
             <Text style={{ color: theme.colors.textSecondary, marginBottom: 8 }}>
-              {item.childName} · {item.points} pts · concluído em {formatDateTime(item.completedAt)}
+              {item.childName} ·{" "}
+              {item.effectivePoints > item.points
+                ? `${item.effectivePoints} pts (base ${item.points} + bônus de fim de semana)`
+                : `${item.points} pts`}{" "}
+              · concluído em {formatDateTime(item.completedAt)}
             </Text>
             {item.evidenceUrl ? (
               <Image source={{ uri: item.evidenceUrl }} style={styles.evidence} resizeMode="cover" />

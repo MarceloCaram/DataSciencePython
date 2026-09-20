@@ -27,6 +27,14 @@ export interface Family {
   id: string;
   name: string;
   createdAt: string;
+  /** Multiplicador aplicado aos pontos de tarefas concluídas/aprovadas no
+   * fim de semana (sábado/domingo). Configurável por família — ver
+   * GET/PATCH /family/settings. Default: GAMIFICATION_DEFAULTS.weekendMultiplier. */
+  weekendMultiplier: number;
+}
+
+export interface FamilySettings {
+  weekendMultiplier: number;
 }
 
 export interface Parent {
@@ -65,8 +73,15 @@ export interface Task {
   childId: string;
   title: string;
   category: TaskCategory;
+  /** Pontos base da tarefa, sem nenhum bônus aplicado. */
   points: number;
-  dueDate: string;
+  /** Pontos que a tarefa vale *hoje*, já com o multiplicador de fim de
+   * semana da família aplicado (ver Family.weekendMultiplier). É o valor
+   * que deve ser exibido nas telas do filho, para não gerar confusão entre
+   * o que foi anunciado e o que foi creditado ao aprovar. Presente apenas
+   * em respostas de listagem/detalhe vindas da API — não é enviado ao criar
+   * uma tarefa. */
+  effectivePoints?: number;
   createdAt: string;
 }
 

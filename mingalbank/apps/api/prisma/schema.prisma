@@ -52,6 +52,9 @@ model Family {
   id        String   @id @default(cuid())
   name      String
   createdAt DateTime @default(now())
+  // Multiplicador aplicado aos pontos de tarefas aprovadas no fim de semana
+  // (sábado/domingo), configurável pelo responsável via /family/settings.
+  weekendMultiplier Float @default(1.5)
 
   parents Parent[]
   children Child[]
@@ -116,7 +119,6 @@ model Task {
   title     String
   category  TaskCategory
   points    Int
-  dueDate   DateTime
   createdAt DateTime     @default(now())
 
   completions TaskCompletion[]

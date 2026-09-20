@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { prisma } from "../../lib/prisma";
 import { AppError } from "../../lib/errors";
 import { serializeTask, serializeTaskCompletion } from "../../lib/serializers";
+import { applyWeekendMultiplier } from "../wallet/gamification";
 import type { TaskApprovalDeps } from "./taskApproval.service";
 import { reviewTaskCompletion } from "./taskApproval.service";
 import type { CompleteTaskInput, CreateTaskInput, ListTasksQuery, ReviewCompletionInput } from "./tasks.schemas";
@@ -22,7 +23,6 @@ export async function createTask(req: Request, res: Response): Promise<void> {
       title: input.title,
       category: input.category,
       points: input.points,
-      dueDate: input.dueDate,
     },
   });
 
@@ -42,17 +42,25 @@ export async function listTasks(req: Request, res: Response): Promise<void> {
     if (childId) where.childId = childId;
   }
 
-  const tasks = await prisma.task.findMany({
-    where,
-    include: status ? { completions: { where: { status } } } : { completions: true },
-    orderBy: { dueDate: "asc" },
-  });
+  const [tasks, family] = await Promise.all([
+    prisma.task.findMany({
+      where,
+      include: status ? { completions: { where: { status } } } : { completions: true },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.family.findUnique({ where: { id: familyId }, select: { weekendMultiplier: true } }),
+  ]);
 
   const filtered = status ? tasks.filter((t) => t.completions.length > 0) : tasks;
+  const now = new Date();
 
   res.status(200).json({
     tasks: filtered.map((t) => ({
       ...serializeTask(t),
+      // Pontos que a tarefa vale HOJE, já com o multiplicador de fim de
+      // semana da família — evita a criança completar uma tarefa de 2
+      // pontos e ver 3 pontos creditados sem entender o porquê.
+      effectivePoints: applyWeekendMultiplier(t.points, now, family?.weekendMultiplier),
       completions: t.completions.map(serializeTaskCompletion),
     })),
   });
@@ -94,6 +102,9 @@ function buildPrismaApprovalDeps(): TaskApprovalDeps {
     async findChild(childId) {
       const child = await prisma.child.findUnique({ where: { id: childId } });
       return child as unknown as Awaited<ReturnType<TaskApprovalDeps["findChild"]>>;
+    },
+    async findFamily(familyId) {
+      return prisma.family.findUnique({ where: { id: familyId }, select: { weekendMultiplier: true } });
     },
     async sumWeeklyTaskRewardPoints(childId, weekStart, weekEnd) {
       const aggregate = await prisma.walletTransaction.aggregate({

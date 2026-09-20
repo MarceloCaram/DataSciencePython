@@ -11,6 +11,7 @@ export function serializeFamily(family: Family) {
     id: family.id,
     name: family.name,
     createdAt: family.createdAt.toISOString(),
+    weekendMultiplier: family.weekendMultiplier,
   };
 }
 
@@ -50,7 +51,6 @@ export function serializeTask(task: Task) {
     title: task.title,
     category: task.category,
     points: task.points,
-    dueDate: task.dueDate.toISOString(),
     createdAt: task.createdAt.toISOString(),
   };
 }

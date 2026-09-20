@@ -9,6 +9,7 @@ import {
   BadgeTier,
   Child,
   Family,
+  FamilySettings,
   Parent,
   Reward,
   RewardType,
@@ -54,7 +55,6 @@ export interface CreateTaskInput {
   title: string;
   category: TaskCategory;
   points: number;
-  dueDate: string;
 }
 
 export interface CompleteTaskInput {
@@ -90,6 +90,9 @@ export interface PendingApproval extends TaskCompletion {
   taskTitle: string;
   childName: string;
   points: number;
+  /** Pontos que serão creditados se o pai aprovar agora (já com o
+   * multiplicador de fim de semana da família aplicado). */
+  effectivePoints: number;
 }
 
 export interface PendingRedemption extends RedemptionRequestDTO {
@@ -103,4 +106,4 @@ export interface DashboardOverview {
   pendingRedemptions: PendingRedemption[];
 }
 
-export type { Task, TaskCompletion, Reward, WalletTransaction, Child, Parent, Family };
+export type { Task, TaskCompletion, Reward, WalletTransaction, Child, Parent, Family, FamilySettings };

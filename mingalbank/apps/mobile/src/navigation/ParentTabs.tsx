@@ -6,6 +6,7 @@ import { LogoutButton } from "../components";
 import { ApprovalsScreen } from "../screens/parent/ApprovalsScreen";
 import { ChildrenScreen } from "../screens/parent/ChildrenScreen";
 import { CreateTaskScreen } from "../screens/parent/CreateTaskScreen";
+import { FamilySettingsScreen } from "../screens/parent/FamilySettingsScreen";
 import { ParentDashboardScreen } from "../screens/parent/ParentDashboardScreen";
 import { ThemeProvider, parentColors } from "../theme";
 import type { ParentTabParamList } from "./types";
@@ -17,6 +18,7 @@ const TAB_ICON: Record<keyof ParentTabParamList, string> = {
   Children: "👨‍👩‍👧",
   CreateTask: "➕",
   Approvals: "✅",
+  Settings: "⚙️",
 };
 
 const TAB_LABEL: Record<keyof ParentTabParamList, string> = {
@@ -24,6 +26,7 @@ const TAB_LABEL: Record<keyof ParentTabParamList, string> = {
   Children: "Filhos",
   CreateTask: "Nova tarefa",
   Approvals: "Aprovações",
+  Settings: "Ajustes",
 };
 
 function ParentTabsInner() {
@@ -45,6 +48,7 @@ function ParentTabsInner() {
       <Tab.Screen name="Children" component={ChildrenScreen} options={{ title: "Filhos" }} />
       <Tab.Screen name="CreateTask" component={CreateTaskScreen} options={{ title: "Nova tarefa" }} />
       <Tab.Screen name="Approvals" component={ApprovalsScreen} options={{ title: "Aprovações" }} />
+      <Tab.Screen name="Settings" component={FamilySettingsScreen} options={{ title: "Ajustes" }} />
     </Tab.Navigator>
   );
 }

@@ -96,6 +96,9 @@ export function TaskDetailScreen() {
     );
   }
 
+  const effectivePoints = task.effectivePoints ?? task.points;
+  const hasWeekendBonus = effectivePoints > task.points;
+
   return (
     <ScreenContainer>
       <ScreenTitle>{task.title}</ScreenTitle>
@@ -103,10 +106,12 @@ export function TaskDetailScreen() {
 
       <Card>
         <CategoryTag category={task.category} />
-        <Text style={[styles.points, { color: theme.colors.primary }]}>⭐ {task.points} pontos</Text>
-        <Text style={{ color: theme.colors.textSecondary }}>
-          Prazo: {new Date(task.dueDate).toLocaleDateString("pt-BR")}
-        </Text>
+        <Text style={[styles.points, { color: theme.colors.primary }]}>⭐ {effectivePoints} pontos</Text>
+        {hasWeekendBonus ? (
+          <Text style={{ color: theme.colors.success, fontWeight: "700" }}>
+            🎉 Hoje é fim de semana! Bônus já incluído (base: {task.points} pts).
+          </Text>
+        ) : null}
       </Card>
 
       <Card>

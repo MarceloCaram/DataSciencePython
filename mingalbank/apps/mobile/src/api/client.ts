@@ -35,6 +35,7 @@ import type {
   UpdateChildInput,
   WalletSummary,
 } from "./types";
+import type { FamilySettings } from "../../../../packages/shared/domain";
 
 function childIdFromMockToken(token: string | null | undefined): string {
   const match = token?.match(/^mock-token-child-(.+)$/);
@@ -135,7 +136,7 @@ export const tasksApi = {
 
   create(
     token: string,
-    input: { childId: string; title: string; category: TaskCategory; points: number; dueDate: string }
+    input: { childId: string; title: string; category: TaskCategory; points: number }
   ): Promise<Task> {
     return withFallback(
       () => request<Task>("/tasks", { method: "POST", body: input, token }),
@@ -225,6 +226,26 @@ export const rewardsApi = {
     return withFallback(
       () => request<WalletTransaction>(`/rewards/${rewardId}/claim`, { method: "POST", token }),
       () => mockApi.claimReward(childIdFromMockToken(token), rewardId)
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Family settings
+// ---------------------------------------------------------------------------
+
+export const familyApi = {
+  getSettings(token: string): Promise<FamilySettings> {
+    return withFallback(
+      () => request<FamilySettings>("/family/settings", { token }),
+      () => mockApi.getFamilySettings()
+    );
+  },
+
+  updateSettings(token: string, patch: FamilySettings): Promise<FamilySettings> {
+    return withFallback(
+      () => request<FamilySettings>("/family/settings", { method: "PATCH", body: patch, token }),
+      () => mockApi.updateFamilySettings(patch)
     );
   },
 };

@@ -7,6 +7,7 @@ export type ParentTabParamList = {
   Children: undefined;
   CreateTask: undefined;
   Approvals: undefined;
+  Settings: undefined;
 };
 
 export type ChildTasksStackParamList = {

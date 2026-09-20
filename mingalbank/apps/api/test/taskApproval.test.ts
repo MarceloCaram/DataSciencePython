@@ -18,6 +18,7 @@ function createFakeDeps(overrides?: {
   completion?: Partial<TaskCompletionRecord>;
   child?: Partial<ChildRecord>;
   weeklyPoints?: number;
+  weekendMultiplier?: number;
 }) {
   const completion: TaskCompletionRecord = {
     id: "completion-1",
@@ -54,6 +55,10 @@ function createFakeDeps(overrides?: {
     async findChild(childId) {
       if (state.child.id !== childId) return null;
       return state.child;
+    },
+    async findFamily(familyId) {
+      if (familyId !== FAMILY_ID) return null;
+      return { weekendMultiplier: overrides?.weekendMultiplier ?? 1.5 };
     },
     async sumWeeklyTaskRewardPoints() {
       return state.weeklyPoints;
@@ -143,6 +148,23 @@ describe("reviewTaskCompletion", () => {
     expect(result.pointsAwarded).toBe(15); // 10 * 1.5
     expect(result.nextStreak).toBe(4);
     expect(state.child.pointsBalance).toBe(65);
+  });
+
+  it("uses the family's configured weekend multiplier instead of the hardcoded 1.5x", async () => {
+    const { deps } = createFakeDeps({ weekendMultiplier: 2 });
+    const now = new Date("2026-09-19T10:00:00.000Z"); // Saturday
+
+    const result = await reviewTaskCompletion(deps, {
+      taskId: TASK_ID,
+      completionId: "completion-1",
+      familyId: FAMILY_ID,
+      parentId: PARENT_ID,
+      approve: true,
+      now,
+    });
+
+    expect(result.weekendBonusApplied).toBe(true);
+    expect(result.pointsAwarded).toBe(20); // 10 * 2 (family override), not 15 (default 1.5x)
   });
 
   it("applies the streak bonus once the weekly total reaches the threshold", async () => {

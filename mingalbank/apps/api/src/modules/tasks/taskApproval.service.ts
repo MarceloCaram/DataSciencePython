@@ -37,6 +37,7 @@ export interface ChildRecord {
 export interface TaskApprovalDeps {
   findCompletion(completionId: string, taskId: string): Promise<TaskCompletionRecord | null>;
   findChild(childId: string): Promise<ChildRecord | null>;
+  findFamily(familyId: string): Promise<{ weekendMultiplier: number } | null>;
   sumWeeklyTaskRewardPoints(childId: string, weekStart: Date, weekEnd: Date): Promise<number>;
   applyApproval(input: {
     completionId: string;
@@ -96,12 +97,16 @@ export async function reviewTaskCompletion(
   }
 
   const { start, end } = getWeekRange(now);
-  const weeklyPointsBeforeThisTask = await deps.sumWeeklyTaskRewardPoints(child.id, start, end);
+  const [weeklyPointsBeforeThisTask, family] = await Promise.all([
+    deps.sumWeeklyTaskRewardPoints(child.id, start, end),
+    deps.findFamily(completion.task.familyId),
+  ]);
 
   const { finalPoints, weekendBonusApplied, streakBonusApplied } = calculateTaskPoints({
     basePoints: completion.task.points,
     completedAt: now,
     weeklyPointsBeforeThisTask,
+    weekendMultiplier: family?.weekendMultiplier,
   });
 
   const nextStreak = computeNextStreak(child.currentStreak, child.lastApprovedDate, now);
@@ -109,7 +114,7 @@ export async function reviewTaskCompletion(
   const newBadgeTier = computeBadgeTier(newPointsBalance);
 
   const bonusNotes = [
-    weekendBonusApplied ? "bônus de fim de semana (1.5x)" : null,
+    weekendBonusApplied ? `bônus de fim de semana (${family?.weekendMultiplier ?? 1.5}x)` : null,
     streakBonusApplied ? "bônus de streak (+10%)" : null,
   ].filter(Boolean);
   const description =

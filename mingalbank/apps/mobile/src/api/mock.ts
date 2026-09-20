@@ -36,6 +36,7 @@ import type {
   UpdateChildInput,
   WalletSummary,
 } from "./types";
+import type { FamilySettings } from "../../../../packages/shared/domain";
 
 function delay<T>(value: T): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), MOCK_LATENCY_MS));
@@ -71,6 +72,7 @@ const family: Family = {
   id: "fam-1",
   name: "Família Silva",
   createdAt: isoDaysFromNow(-120),
+  weekendMultiplier: GAMIFICATION_DEFAULTS.weekendMultiplier,
 };
 
 const parent: Parent = {
@@ -131,7 +133,6 @@ let tasks: Task[] = [
     title: "Arrumar a cama",
     category: "HOME",
     points: 5,
-    dueDate: isoDaysFromNow(0),
     createdAt: isoDaysFromNow(-1),
   },
   {
@@ -141,7 +142,6 @@ let tasks: Task[] = [
     title: "Ler 20 minutos",
     category: "STUDY",
     points: 8,
-    dueDate: isoDaysFromNow(0),
     createdAt: isoDaysFromNow(-1),
   },
   {
@@ -151,7 +151,6 @@ let tasks: Task[] = [
     title: "Escovar os dentes 2x",
     category: "HEALTH",
     points: 3,
-    dueDate: isoDaysFromNow(1),
     createdAt: isoDaysFromNow(-1),
   },
   {
@@ -161,7 +160,6 @@ let tasks: Task[] = [
     title: "Guardar os brinquedos",
     category: "HOME",
     points: 4,
-    dueDate: isoDaysFromNow(0),
     createdAt: isoDaysFromNow(-1),
   },
   {
@@ -171,7 +169,6 @@ let tasks: Task[] = [
     title: "Desenhar algo novo",
     category: "CREATIVITY",
     points: 6,
-    dueDate: isoDaysFromNow(2),
     createdAt: isoDaysFromNow(-1),
   },
 ];
@@ -326,7 +323,10 @@ export const mockApi = {
   async listTasks(filter: { childId?: string; status?: TaskCompletion["status"] }): Promise<Task[]> {
     let result = tasks;
     if (filter.childId) result = result.filter((task) => task.childId === filter.childId);
-    return delay([...result]);
+    const weekendBonus = isWeekend(new Date()) ? family.weekendMultiplier : 1;
+    return delay(
+      result.map((task) => ({ ...task, effectivePoints: Math.round(task.points * weekendBonus) }))
+    );
   },
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -338,7 +338,6 @@ export const mockApi = {
       title: input.title,
       category: input.category,
       points: input.points,
-      dueDate: input.dueDate,
       createdAt: new Date().toISOString(),
     };
     tasks = [task, ...tasks];
@@ -381,7 +380,7 @@ export const mockApi = {
     if (approve) {
       const task = requireTask(completion.taskId);
       const child = requireChild(completion.childId);
-      const weekendBonus = isWeekend(new Date()) ? GAMIFICATION_DEFAULTS.weekendMultiplier : 1;
+      const weekendBonus = isWeekend(new Date()) ? family.weekendMultiplier : 1;
       const earnedPoints = Math.round(task.points * weekendBonus);
       child.pointsBalance += earnedPoints;
       child.currentStreak += 1;
@@ -524,16 +523,19 @@ export const mockApi = {
 
   // --- dashboard ---
   async getDashboard(): Promise<DashboardOverview> {
+    const weekendBonus = isWeekend(new Date()) ? family.weekendMultiplier : 1;
     const pendingTaskApprovals: PendingApproval[] = taskCompletions
       .filter((completion) => completion.status === "PENDING")
       .map((completion) => {
         const task = tasks.find((entry) => entry.id === completion.taskId);
         const child = children.find((entry) => entry.id === completion.childId);
+        const basePoints = task?.points ?? 0;
         return {
           ...completion,
           taskTitle: task?.title ?? "Tarefa removida",
           childName: child?.name ?? "Filho(a)",
-          points: task?.points ?? 0,
+          points: basePoints,
+          effectivePoints: Math.round(basePoints * weekendBonus),
         };
       });
 
@@ -550,5 +552,15 @@ export const mockApi = {
       pendingTaskApprovals,
       pendingRedemptions,
     });
+  },
+
+  // --- family settings ---
+  async getFamilySettings(): Promise<FamilySettings> {
+    return delay({ weekendMultiplier: family.weekendMultiplier });
+  },
+
+  async updateFamilySettings(patch: FamilySettings): Promise<FamilySettings> {
+    family.weekendMultiplier = patch.weekendMultiplier;
+    return delay({ weekendMultiplier: family.weekendMultiplier });
   },
 };

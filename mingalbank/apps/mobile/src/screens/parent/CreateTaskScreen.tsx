@@ -21,12 +21,6 @@ import { useAppTheme } from "../../theme";
 
 const CATEGORIES: TaskCategory[] = ["HEALTH", "STUDY", "HOME", "CREATIVITY"];
 
-function isoInDays(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
 export function CreateTaskScreen() {
   const theme = useAppTheme();
   const { session } = useAuth();
@@ -42,7 +36,6 @@ export function CreateTaskScreen() {
   const [category, setCategory] = useState<TaskCategory>("HOME");
   const [points, setPoints] = useState(5);
   const [childId, setChildId] = useState<string | null>(null);
-  const [dueDate, setDueDate] = useState(isoInDays(0));
 
   const load = useCallback(async () => {
     setLoadingChildren(true);
@@ -75,7 +68,6 @@ export function CreateTaskScreen() {
         title: title.trim(),
         category,
         points,
-        dueDate: new Date(dueDate).toISOString(),
       });
       setTitle("");
       setPoints(5);
@@ -97,7 +89,7 @@ export function CreateTaskScreen() {
 
   return (
     <ScreenContainer>
-      <ScreenTitle subtitle="Templates, pontos e prazo para motivar seus filhos">Nova tarefa</ScreenTitle>
+      <ScreenTitle subtitle="Templates e pontos para motivar seus filhos">Nova tarefa</ScreenTitle>
       {error ? <ErrorBanner message={error} /> : null}
       {success ? (
         <View style={[styles.success, { backgroundColor: `${theme.colors.success}18`, borderColor: theme.colors.success }]}>
@@ -140,13 +132,6 @@ export function CreateTaskScreen() {
             >
               <Text style={styles.stepperText}>+</Text>
             </TouchableOpacity>
-          </View>
-
-          <SectionTitle>Prazo</SectionTitle>
-          <View style={styles.chipsRow}>
-            <SelectableChip label="Hoje" selected={dueDate === isoInDays(0)} onPress={() => setDueDate(isoInDays(0))} />
-            <SelectableChip label="Amanhã" selected={dueDate === isoInDays(1)} onPress={() => setDueDate(isoInDays(1))} />
-            <SelectableChip label="Esta semana" selected={dueDate === isoInDays(6)} onPress={() => setDueDate(isoInDays(6))} />
           </View>
 
           <View style={{ height: 8 }} />

@@ -12,10 +12,6 @@ import { useAuth } from "../../state/auth";
 import { useTaskSubmissions } from "../../state/taskSubmissions";
 import { useAppTheme } from "../../theme";
 
-function formatDueDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
-}
-
 export function TaskListScreen() {
   const theme = useAppTheme();
   const { session } = useAuth();
@@ -72,22 +68,30 @@ export function TaskListScreen() {
         <EmptyState label="Nenhuma tarefa disponível por enquanto. Volte mais tarde! 🎉" />
       ) : null}
 
-      {pending.map((task) => (
-        <TouchableOpacity key={task.id} activeOpacity={0.8} onPress={() => navigation.navigate("TaskDetail", { taskId: task.id })}>
-          <Card style={styles.card}>
-            <View style={styles.row}>
-              <View style={styles.info}>
-                <Text style={[styles.title, { color: theme.colors.textPrimary }]}>{task.title}</Text>
-                <CategoryTag category={task.category} />
+      {pending.map((task) => {
+        const effectivePoints = task.effectivePoints ?? task.points;
+        const hasBonus = effectivePoints > task.points;
+        return (
+          <TouchableOpacity key={task.id} activeOpacity={0.8} onPress={() => navigation.navigate("TaskDetail", { taskId: task.id })}>
+            <Card style={styles.card}>
+              <View style={styles.row}>
+                <View style={styles.info}>
+                  <Text style={[styles.title, { color: theme.colors.textPrimary }]}>{task.title}</Text>
+                  <CategoryTag category={task.category} />
+                </View>
+                <View style={styles.pointsWrap}>
+                  <Text style={[styles.points, { color: theme.colors.primary }]}>⭐ {effectivePoints}</Text>
+                  {hasBonus ? (
+                    <Text style={{ color: theme.colors.success, fontSize: 12, fontWeight: "700" }}>
+                      🎉 fim de semana
+                    </Text>
+                  ) : null}
+                </View>
               </View>
-              <View style={styles.pointsWrap}>
-                <Text style={[styles.points, { color: theme.colors.primary }]}>⭐ {task.points}</Text>
-                <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>até {formatDueDate(task.dueDate)}</Text>
-              </View>
-            </View>
-          </Card>
-        </TouchableOpacity>
-      ))}
+            </Card>
+          </TouchableOpacity>
+        );
+      })}
 
       {submitted.length > 0 ? (
         <>
