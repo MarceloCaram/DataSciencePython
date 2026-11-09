@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import traceback
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 
 spark = None
@@ -20,6 +21,12 @@ NUM_PARTICOES_LEITURA = 16
 NUM_PARTICOES_ESCRITA = 16
 BATCH_SIZE = 20000
 FETCH_SIZE = 20000
+
+# A TB02 (produtos + PERFIL_COMBO) e montada direto na origem (join no Oracle).
+# A TB01 e a mesma TB02 sem a coluna PERFIL_COMBO. Deixe True somente se algum
+# processo ainda le a TB01: o resultado e persistido no Spark para que a query
+# de origem rode uma vez so.
+GRAVAR_TB01 = False
 
 
 def _get_param(nome, obrigatorio=True, default=None):
@@ -159,11 +166,14 @@ def main():
     _tempo("PASSO 01a", inicio)
 
     # -------------------------------------------------------------------------
-    # PASSO 01 - Leitura dos produtos instalados (particionada)
+    # PASSO 01 - Leitura dos produtos instalados + PERFIL_COMBO (particionada)
     # Hint PARALLEL reduzido para 4: com 16 particoes, ate 64 processos no Oracle.
     # A.ID_PONTO e exposto como PART_KEY para o particionamento do Spark.
+    # O PERFIL_COMBO e cruzado aqui mesmo no NETRDM (subquery PC), filtrado pela
+    # base e ligado por CD_BASE + contrato + cidade. Isso evita trazer as ~53 mi
+    # linhas de perfil para o Spark e evita duplicar contratos de outras bases.
     # -------------------------------------------------------------------------
-    print("=== PASSO 01b: LENDO PRODUTOS INSTALADOS DA ORIGEM ===")
+    print("=== PASSO 01b: LENDO PRODUTOS INSTALADOS + PERFIL COMBO DA ORIGEM ===")
     step_01_query = f"""
 SELECT /*+ PARALLEL (4)
            INDEX (D IX_SN_PLANO_VENDA_02)
@@ -180,6 +190,7 @@ E.PRECO VL_TABELA, C.DESCRICAO_BOLETO,
 NVL(A1.ID_FORMA_ENVIO_FATURA,2) ID_FORMA_ENVIO_FATURA,
 A1.ID_TIPO_COBRANCA, A1.ID_TIPO_CONTRATO, A1.ID_DIA_VCTO,
 A2.ID_TIPO_ASSINANTE,
+PC.PERFIL_COMBO,
 A.ID_PONTO PART_KEY
 FROM NETRDM.SN_REL_PONTO_PRODUTO A
 LEFT JOIN NETRDM.SN_REL_PONTO_PRODUTO_PRECO B
@@ -226,12 +237,25 @@ LEFT JOIN NETRDM.SN_PRECO_ASSINANTE H
 ON H.CD_BASE=B.CD_BASE AND H.ID_PRECO=B.ID_PRECO AND H.ID_PRECO!=0
 AND H.DT_INI_PRECO<TRUNC(SYSDATE) AND H.DT_FIM_PRECO>=TRUNC(SYSDATE)
 AND H.FL_STATUS_BI='A'
+LEFT JOIN (
+    SELECT CP.CD_BASE, CP.NUM_CONTRATO, CP.CID_CONTRATO,
+           R.DESCRICAO PERFIL_COMBO
+      FROM NETRDM.SN_REL_CONTRATO_PERFIL_CLT CP
+      JOIN NETRDM.SN_REL_ATRIBUTOS_PARAMETRO R
+        ON R.FL_STATUS_BI='A' AND R.CD_BASE=CP.CD_BASE
+       AND R.ID_ATRIBUTO_PARAMETRO=CP.ID_PERFIL_CLIENTE
+     WHERE CP.FN_INSTALADO=1 AND CP.FL_STATUS_BI='A'
+       AND CP.DT_FIM_OFERTA=TO_DATE('30/12/2049','DD/MM/YYYY')
+       AND CP.CD_BASE='{base}'
+) PC
+ON PC.CD_BASE=A1.CD_BASE AND PC.NUM_CONTRATO=A1.NUM_CONTRATO
+AND PC.CID_CONTRATO=A1.CID_CONTRATO
 WHERE A.FL_STATUS_BI='A' AND A.INSTALADO=1
 AND A.DT_INI<TRUNC(SYSDATE) AND A.DT_FIM>=TRUNC(SYSDATE)
 AND A.CD_BASE='{base}'"""
 
     # Leitura e lazy: aqui so o plano e montado. A query roda de fato no write.
-    tb01_df = _read_source(
+    tb02_df = _read_source(
         jdbc_url_source, db_user_source, db_password_source, step_01_query,
         partition_column="PART_KEY",
         lower_bound=lower_bound,
@@ -241,20 +265,39 @@ AND A.CD_BASE='{base}'"""
 
     # Alternativa (se nao quiser multiplas consultas na origem): ler sem
     # particionar e descomentar a linha abaixo para paralelizar so a escrita.
-    # tb01_df = tb01_df.repartition(NUM_PARTICOES_ESCRITA)
+    # tb02_df = tb02_df.repartition(NUM_PARTICOES_ESCRITA)
+
+    if GRAVAR_TB01:
+        # Evita executar a query pesada da origem duas vezes.
+        tb02_df = tb02_df.persist(StorageLevel.DISK_ONLY)
 
     # -------------------------------------------------------------------------
-    # PASSO 02 - Gravacao no destino (aqui a leitura + escrita acontecem)
+    # PASSO 02 - Gravacao da TB02 no destino (aqui a leitura + escrita acontecem)
     # -------------------------------------------------------------------------
-    tabela_destino = f"TMP_WRK_PROD_PONTO_{base}_TB01"
-    print(f"=== PASSO 02: GRAVANDO {tabela_destino} NO DESTINO ===")
+    tabela_tb02 = f"TMP_WRK_PROD_PONTO_{base}_TB02"
+    print(f"=== PASSO 02: GRAVANDO {tabela_tb02} NO DESTINO ===")
     inicio = time.perf_counter()
     _write_target(
-        tb01_df, jdbc_url_target, db_user_target, db_password_target,
-        tabela_destino, num_partitions=NUM_PARTICOES_ESCRITA,
+        tb02_df, jdbc_url_target, db_user_target, db_password_target,
+        tabela_tb02, num_partitions=NUM_PARTICOES_ESCRITA,
     )
     print("=== FIM PASSO 02 ===")
-    _tempo("PASSO 02 (leitura + gravacao)", inicio)
+    _tempo("PASSO 02 (leitura + gravacao TB02)", inicio)
+
+    # -------------------------------------------------------------------------
+    # PASSO 03 (opcional) - TB01 = TB02 sem PERFIL_COMBO
+    # -------------------------------------------------------------------------
+    if GRAVAR_TB01:
+        tabela_tb01 = f"TMP_WRK_PROD_PONTO_{base}_TB01"
+        print(f"=== PASSO 03: GRAVANDO {tabela_tb01} NO DESTINO ===")
+        inicio = time.perf_counter()
+        _write_target(
+            tb02_df.drop("PERFIL_COMBO"), jdbc_url_target, db_user_target,
+            db_password_target, tabela_tb01, num_partitions=NUM_PARTICOES_ESCRITA,
+        )
+        tb02_df.unpersist()
+        print("=== FIM PASSO 03 ===")
+        _tempo("PASSO 03 (gravacao TB01)", inicio)
 
     print("=== FIM DO WORKFLOW ===")
     _tempo("total do workflow", inicio_workflow)
