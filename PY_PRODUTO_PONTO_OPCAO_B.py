@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import traceback
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession, functions as F
 
 spark = None
@@ -22,8 +23,11 @@ BATCH_SIZE = 20000
 FETCH_SIZE = 20000
 
 # Join no Spark (OPCAO B): numero de particoes do shuffle do join TB01 x PERFIL.
-# Com AQE ligado o Spark ainda pode juntar particoes pequenas automaticamente.
+# A TB01 e reparticionada por estas chaves com o MESMO numero de particoes,
+# para o Spark poder reaproveitar essa distribuicao no join e embaralhar so o
+# lado do perfil. Mantenha os dois valores iguais.
 SHUFFLE_PARTITIONS = 64
+CHAVES_JOIN_TB01 = ["CD_BASE", "NR_CONTRATO", "CD_CIDADE"]
 
 
 def _get_param(nome, obrigatorio=True, default=None):
@@ -245,12 +249,24 @@ AND A.CD_BASE='{base}'"""
         num_partitions=NUM_PARTICOES_LEITURA,
     ).drop("PART_KEY")
 
-    # Alternativa (se nao quiser multiplas consultas na origem): ler sem
-    # particionar e descomentar a linha abaixo para paralelizar so a escrita.
-    # tb01_df = tb01_df.repartition(NUM_PARTICOES_ESCRITA)
+    # repartition pelas chaves do join + persist em disco:
+    # - a TB01 e usada duas vezes (gravacao no ADEX e join com o perfil), entao
+    #   a query da origem roda uma vez so e a TB01 nao e relida do ADEX;
+    # - a distribuicao por CD_BASE/NR_CONTRATO/CD_CIDADE em SHUFFLE_PARTITIONS
+    #   particoes permite ao join reaproveitar o particionamento (confira com
+    #   tb02_df.explain(): o lado "t" nao deve ter Exchange);
+    # - o repartition tambem equilibra particoes desbalanceadas por ID_PONTO.
+    # O persist e lazy: quem preenche o cache e a gravacao da TB01 logo abaixo.
+    tb01_df = (
+        tb01_df
+        .repartition(SHUFFLE_PARTITIONS, *CHAVES_JOIN_TB01)
+        .persist(StorageLevel.DISK_ONLY)
+    )
 
     # -------------------------------------------------------------------------
-    # PASSO 02 - Gravacao no destino (aqui a leitura + escrita acontecem)
+    # PASSO 02 - Gravacao no destino (leitura da origem + cache + escrita)
+    # numPartitions=NUM_PARTICOES_ESCRITA limita as conexoes no ADEX mesmo com
+    # SHUFFLE_PARTITIONS particoes no DataFrame.
     # -------------------------------------------------------------------------
     tabela_destino = f"TMP_WRK_PROD_PONTO_{base}_TB01"
     print(f"=== PASSO 02: GRAVANDO {tabela_destino} NO DESTINO ===")
@@ -265,25 +281,24 @@ AND A.CD_BASE='{base}'"""
     # =========================================================================
     # OPCAO B - PERFIL COMBO com join no Spark
     # -------------------------------------------------------------------------
-    # As duas leituras sao particionadas pela MESMA faixa de contratos:
-    #   - TB01 (ADEX)        -> partitionColumn = NR_CONTRATO
-    #   - PERFIL (NETRDM)    -> partitionColumn = NUM_CONTRATO
+    # A TB01 vem do cache (tb01_df persistido), sem nova leitura no ADEX.
+    # O perfil e lido do NETRDM particionado pela faixa de contratos da TB01.
     # Contratos fora da faixa nao se perdem: a primeira e a ultima particao do
-    # Spark sao abertas nas pontas. Perfis fora da faixa da TB01 apenas nao casam
-    # no LEFT JOIN.
+    # Spark sao abertas nas pontas. Perfis fora da faixa apenas nao casam no
+    # LEFT JOIN.
     # =========================================================================
 
     # -------------------------------------------------------------------------
-    # PASSO 03a - Faixa de contratos (consulta rapida na TB01 ja gravada no ADEX)
+    # PASSO 03a - Faixa de contratos (calculada a partir do cache)
     # -------------------------------------------------------------------------
     print("=== PASSO 03a: CALCULANDO FAIXA DE CONTRATOS ===")
     inicio = time.perf_counter()
-    b = _read_source(
-        jdbc_url_target, db_user_target, db_password_target,
-        f"SELECT MIN(NR_CONTRATO) MN, MAX(NR_CONTRATO) MX FROM {tabela_destino}",
+    b = tb01_df.agg(
+        F.min("NR_CONTRATO").alias("MN"), F.max("NR_CONTRATO").alias("MX")
     ).first()
     if b is None or b["MN"] is None:
         print(f"{tabela_destino} vazia. Encerrando.")
+        tb01_df.unpersist()
         return
     c_low = int(b["MN"])
     c_up = int(b["MX"]) + 1
@@ -291,18 +306,9 @@ AND A.CD_BASE='{base}'"""
     _tempo("PASSO 03a", inicio)
 
     # -------------------------------------------------------------------------
-    # PASSO 03b - Leituras particionadas
+    # PASSO 03b - Leitura particionada do perfil combo
     # -------------------------------------------------------------------------
-    print("=== PASSO 03b: LENDO TB01 (ADEX) E PERFIL COMBO (NETRDM) ===")
-    tb01_db_df = _read_source(
-        jdbc_url_target, db_user_target, db_password_target,
-        f"SELECT * FROM {tabela_destino}",
-        partition_column="NR_CONTRATO",
-        lower_bound=c_low,
-        upper_bound=c_up,
-        num_partitions=NUM_PARTICOES_LEITURA,
-    )
-
+    print("=== PASSO 03b: LENDO PERFIL COMBO (NETRDM) ===")
     # Filtrado pela base: alem de reduzir o volume, evita casar contratos de
     # outras bases com o mesmo numero/cidade (o que duplicaria linhas).
     query_contr_perfil = f"""
@@ -330,7 +336,7 @@ SELECT CP.CD_BASE, CP.NUM_CONTRATO, CP.CID_CONTRATO,
     # PASSO 03c - Join (CD_BASE + contrato + cidade) e gravacao da TB02
     # -------------------------------------------------------------------------
     tb02_df = (
-        tb01_db_df.alias("t")
+        tb01_df.alias("t")
         .join(
             profiles_df.alias("p"),
             (F.col("t.CD_BASE") == F.col("p.CD_BASE"))
@@ -353,7 +359,9 @@ SELECT CP.CD_BASE, CP.NUM_CONTRATO, CP.CID_CONTRATO,
         tabela_tb02, num_partitions=NUM_PARTICOES_ESCRITA,
     )
     print("=== FIM PASSO 03 ===")
-    _tempo("PASSO 03 (leituras + join + gravacao TB02)", inicio)
+    _tempo("PASSO 03 (leitura perfil + join + gravacao TB02)", inicio)
+
+    tb01_df.unpersist()
 
     print("=== FIM DO WORKFLOW ===")
     _tempo("total do workflow", inicio_workflow)
